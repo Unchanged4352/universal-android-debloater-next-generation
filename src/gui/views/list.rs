@@ -1,28 +1,24 @@
 use crate::core::config::DeviceSettings;
 use crate::core::helpers::button_primary;
-use crate::core::sync::{
-    apply_pkg_state_commands, perform_adb_commands, AdbError, CommandType, Phone, User,
-};
+use crate::core::sync::{AdbError, Phone, User, adb_shell_command, apply_pkg_state_commands};
 use crate::core::theme::Theme;
 use crate::core::uad_lists::{
-    load_debloat_lists, Opposite, PackageHashMap, PackageState, Removal, UadList, UadListState,
+    Opposite, PackageHashMap, PackageState, Removal, UadList, UadListState, load_debloat_lists,
 };
-use crate::core::utils::{
-    export_selection, fetch_packages, open_url, ANDROID_SERIAL, EXPORT_FILE_NAME, NAME,
-};
+use crate::core::utils::{EXPORT_FILE_NAME, NAME, export_selection, fetch_packages, open_url};
 use crate::gui::style;
 use crate::gui::widgets::navigation_menu::ICONS;
-use std::env;
 use std::path::PathBuf;
 
 use crate::gui::views::settings::Settings;
 use crate::gui::widgets::modal::Modal;
 use crate::gui::widgets::package_row::{Message as RowMessage, PackageRow};
+use crate::gui::widgets::text;
 use iced::widget::{
-    button, checkbox, column, container, horizontal_space, pick_list, radio, row, scrollable, text,
-    text_input, tooltip, vertical_rule, Column, Space,
+    Column, Space, button, checkbox, column, container, horizontal_space, pick_list, radio, row,
+    scrollable, text_input, tooltip, vertical_rule,
 };
-use iced::{alignment, Alignment, Command, Element, Length, Renderer};
+use iced::{Alignment, Command, Element, Length, Renderer, alignment};
 
 #[derive(Debug, Default, Clone)]
 pub struct PackageInfo {
@@ -72,7 +68,7 @@ pub struct List {
 pub enum Message {
     LoadUadList(bool),
     LoadPhonePackages((PackageHashMap, UadListState)),
-    RestoringDevice(Result<CommandType, AdbError>),
+    RestoringDevice(Result<PackageInfo, AdbError>),
     ApplyFilters(Vec<Vec<PackageRow>>),
     SearchInputChanged(String),
     ToggleAllSelected(bool),
@@ -82,7 +78,7 @@ pub enum Message {
     RemovalSelected(Removal),
     ApplyActionOnSelection,
     List(usize, RowMessage),
-    ChangePackageState(Result<CommandType, AdbError>),
+    ChangePackageState(Result<PackageInfo, AdbError>),
     Nothing,
     ModalHide,
     ModalUserSelected(User),
@@ -112,7 +108,6 @@ impl From<Removal> for SummaryEntry {
 }
 
 impl List {
-    // TODO: refactor later
     #[allow(clippy::too_many_lines)]
     pub fn update(
         &mut self,
@@ -145,12 +140,10 @@ impl List {
                 Command::batch(commands)
             }
             Message::RestoringDevice(output) => {
-                if let Ok(res) = output {
-                    if let CommandType::PackageManager(p) = res {
-                        self.loading_state = LoadingState::RestoringDevice(
-                            self.phone_packages[i_user][p.index].name.clone(),
-                        );
-                    }
+                if let Ok(p) = output {
+                    self.loading_state = LoadingState::RestoringDevice(
+                        self.phone_packages[i_user][p.index].name.clone(),
+                    );
                 } else {
                     self.loading_state = LoadingState::RestoringDevice("Error [TODO]".to_string());
                 }
@@ -174,7 +167,11 @@ impl List {
                 self.uad_lists.clone_from(&uad_list);
                 *list_update_state = list_state;
                 Command::perform(
-                    Self::load_packages(uad_list, selected_device.user_list.clone()),
+                    Self::load_packages(
+                        uad_list,
+                        selected_device.adb_id.clone(),
+                        selected_device.user_list.clone(),
+                    ),
                     Message::ApplyFilters,
                 )
             }
@@ -190,9 +187,9 @@ impl List {
                 Command::none()
             }
             Message::ToggleAllSelected(selected) => {
-                #[allow(unused_must_use)]
                 for i in self.filtered_packages.clone() {
                     if self.phone_packages[i_user][i].selected != selected {
+                        #[expect(unused_must_use, reason = "side-effect")]
                         self.update(
                             settings,
                             selected_device,
@@ -226,7 +223,6 @@ impl List {
             }
             Message::List(i_package, row_message) => {
                 #[expect(unused_must_use, reason = "side-effect")]
-                #[expect(clippy::shadow_unrelated, reason = "same-type")]
                 {
                     self.phone_packages[i_user][i_package]
                         .update(&row_message)
@@ -244,9 +240,17 @@ impl List {
 
                         if settings.device.multi_user_mode {
                             for u in selected_device.user_list.iter().filter(|&u| !u.protected) {
-                                self.phone_packages[u.index][i_package].selected = toggle;
-                                if toggle {
-                                    self.selected_packages.push((u.index, i_package));
+                                if let Some(pkg) = self
+                                    .phone_packages
+                                    .get_mut(u.index)
+                                    .and_then(|pkgs| pkgs.get_mut(i_package))
+                                {
+                                    pkg.selected = toggle;
+                                    if toggle
+                                        && !self.selected_packages.contains(&(u.index, i_package))
+                                    {
+                                        self.selected_packages.push((u.index, i_package));
+                                    }
                                 }
                             }
                             if !toggle {
@@ -255,7 +259,9 @@ impl List {
                         } else {
                             package.selected = toggle;
                             if toggle {
-                                self.selected_packages.push((i_user, i_package));
+                                if !self.selected_packages.contains(&(i_user, i_package)) {
+                                    self.selected_packages.push((i_user, i_package));
+                                }
                             } else {
                                 self.selected_packages
                                     .retain(|&x| x.1 != i_package || x.0 != i_user);
@@ -295,7 +301,7 @@ impl List {
             }
             Message::ChangePackageState(res) => {
                 match res {
-                    Ok(CommandType::PackageManager(p)) => {
+                    Ok(p) => {
                         let package = &mut self.phone_packages[p.i_user][p.index];
                         package.state = package.state.opposite(settings.device.disable_mode);
                         package.selected = false;
@@ -306,7 +312,6 @@ impl List {
                     Err(AdbError::Generic(err)) => {
                         self.error_modal = Some(err);
                     }
-                    _ => {}
                 }
                 Command::none()
             }
@@ -343,7 +348,7 @@ impl List {
                 match export {
                     Ok(_) => self.export_modal = true,
                     Err(err) => error!("Failed to export current selection: {:?}", err),
-                };
+                }
                 Command::none()
             }
             Message::Nothing => Command::none(),
@@ -411,17 +416,19 @@ impl List {
             .style(style::CheckBox::SettingsEnabled)
             .spacing(0); // no label, so remove space entirely
 
-        let col_sel_all = row![tooltip(
-            select_all_checkbox,
-            if self.all_selected {
-                "Deselect all"
-            } else {
-                "Select all"
-            },
-            tooltip::Position::Top,
-        )
-        .style(style::Container::Tooltip)
-        .gap(4)]
+        let col_sel_all = row![
+            tooltip(
+                select_all_checkbox,
+                if self.all_selected {
+                    "Deselect all"
+                } else {
+                    "Select all"
+                },
+                tooltip::Position::Top,
+            )
+            .style(style::Container::Tooltip)
+            .gap(4)
+        ]
         .padding(8);
 
         let user_picklist = pick_list(
@@ -459,7 +466,6 @@ impl List {
         .into()
     }
 
-    // TODO: refactor later
     #[allow(clippy::too_many_lines)]
     fn ready_view(
         &self,
@@ -511,7 +517,7 @@ impl List {
             export_selection = export_selection
                 .on_press(Message::ExportSelection)
                 .style(style::Button::Primary);
-        };
+        }
         // lock
         let export_selection = export_selection;
 
@@ -619,7 +625,6 @@ impl List {
         }
     }
 
-    // TODO: refactor later
     #[allow(clippy::too_many_lines)]
     fn apply_selection_modal(
         &self,
@@ -845,19 +850,26 @@ impl List {
                 (list_filter == UadList::All || p.uad_list == list_filter)
                     && (package_filter == PackageState::All || p.state == package_filter)
                     && (removal_filter == Removal::All || p.removal == removal_filter)
-                    && (self.input_value.is_empty() || p.name.contains(&self.input_value))
+                    && (self.input_value.is_empty()
+                        || p.name.contains(&self.input_value)
+                        || p.description.contains(&self.input_value))
             })
             .map(|(i, _)| i)
             .collect();
     }
     #[expect(clippy::unused_async, reason = "1 call-site")]
-    async fn load_packages(uad_list: PackageHashMap, user_list: Vec<User>) -> Vec<Vec<PackageRow>> {
+    async fn load_packages<S: AsRef<str>>(
+        uad_list: PackageHashMap,
+        device_serial: S,
+        user_list: Vec<User>,
+    ) -> Vec<Vec<PackageRow>> {
+        let serial = device_serial.as_ref();
         if user_list.len() <= 1 {
-            vec![fetch_packages(&uad_list, None)]
+            vec![fetch_packages(&uad_list, serial, None)]
         } else {
             user_list
                 .iter()
-                .map(|user| fetch_packages(&uad_list, Some(user)))
+                .map(|user| fetch_packages(&uad_list, serial, Some(user.id)))
                 .collect()
         }
     }
@@ -867,14 +879,15 @@ impl List {
         let uad_lists = load_debloat_lists(remote);
         match uad_lists {
             Ok(list) => {
-                env::set_var(ANDROID_SERIAL, phone.adb_id.clone());
                 if phone.adb_id.is_empty() {
-                    error!("AppsView ready but no phone found");
+                    warn!("AppsView ready but no phone found");
                 }
                 (list, UadListState::Done)
             }
             Err(local_list) => {
-                error!("Error loading remote debloat list for the phone. Fallback to embedded (and outdated) list");
+                error!(
+                    "Error loading remote debloat list for the phone. Fallback to embedded (and outdated) list"
+                );
                 (local_list, UadListState::Failed)
             }
         }
@@ -894,13 +907,15 @@ fn error_view<'a>(
     .center_y()
     .center_x();
 
-    let modal_btn_row = row![button(
-        text("Close")
-            .width(Length::Fill)
-            .horizontal_alignment(alignment::Horizontal::Center),
-    )
-    .width(Length::Fill)
-    .on_press(Message::ModalHide)]
+    let modal_btn_row = row![
+        button(
+            text("Close")
+                .width(Length::Fill)
+                .horizontal_alignment(alignment::Horizontal::Center),
+        )
+        .width(Length::Fill)
+        .on_press(Message::ModalHide)
+    ]
     .padding([10, 0, 0, 0]);
 
     let text_box = scrollable(text(error).width(Length::Fill)).height(400);
@@ -915,14 +930,14 @@ fn error_view<'a>(
 }
 
 fn waiting_view<'a>(
-    displayed_text: &str,
+    displayed_text: &(impl ToString + ?Sized),
     btn: Option<button::Button<'a, Message, Theme, Renderer>>,
     text_style: style::Text,
 ) -> Element<'a, Message, Theme, Renderer> {
     let col = column![]
         .spacing(10)
         .align_items(Alignment::Center)
-        .push(text(displayed_text).style(text_style).size(20));
+        .push(text(displayed_text.to_string()).style(text_style).size(20));
 
     let col = match btn {
         Some(btn) => col.push(btn.style(style::Button::Primary).padding([5, 10])),
@@ -949,7 +964,11 @@ fn build_action_pkg_commands(
 
     let mut commands = vec![];
     for u in device.user_list.iter().filter(|&&u| {
-        !u.protected && (packages[u.index][selection.1].selected || settings.multi_user_mode)
+        !u.protected
+            && packages
+                .get(u.index)
+                .and_then(|user_pkgs| user_pkgs.get(selection.1))
+                .map_or(false, |pkg| pkg.selected || settings.multi_user_mode)
     }) {
         let u_pkg = &packages[u.index][selection.1];
         let wanted_state = if settings.multi_user_mode {
@@ -958,7 +977,7 @@ fn build_action_pkg_commands(
             u_pkg.state.opposite(settings.disable_mode)
         };
 
-        let actions = apply_pkg_state_commands(&u_pkg.into(), wanted_state, u, device);
+        let actions = apply_pkg_state_commands(&u_pkg.into(), wanted_state, *u, device);
         for (j, action) in actions.into_iter().enumerate() {
             let p_info = PackageInfo {
                 i_user: u.index,
@@ -968,7 +987,13 @@ fn build_action_pkg_commands(
             // In the end there is only one package state change
             // even if we run multiple adb commands
             commands.push(Command::perform(
-                perform_adb_commands(action, CommandType::PackageManager(p_info)),
+                adb_shell_command(
+                    // this is typically small,
+                    // so it's fine.
+                    device.adb_id.clone(),
+                    action,
+                    p_info,
+                ),
                 if j == 0 {
                     Message::ChangePackageState
                 } else {
@@ -992,7 +1017,7 @@ fn recap<'a>(settings: &Settings, recap: &SummaryEntry) -> Element<'a, Message, 
                     text("Uninstall").style(style::Text::Danger)
                 },
                 horizontal_space(),
-                text(recap.discard).style(style::Text::Danger)
+                text(recap.discard.to_string()).style(style::Text::Danger)
             ]
             .width(Length::FillPortion(1)),
             vertical_rule(5),
@@ -1003,7 +1028,7 @@ fn recap<'a>(settings: &Settings, recap: &SummaryEntry) -> Element<'a, Message, 
                     text("Restore").style(style::Text::Ok)
                 },
                 horizontal_space(),
-                text(recap.restore).style(style::Text::Ok)
+                text(recap.restore.to_string()).style(style::Text::Ok)
             ]
             .width(Length::FillPortion(1))
         ]

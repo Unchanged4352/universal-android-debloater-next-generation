@@ -2,11 +2,12 @@ pub mod style;
 pub mod views;
 pub mod widgets;
 
-use crate::core::sync::{get_devices_list, initial_load, perform_adb_commands, CommandType, Phone};
-use crate::core::theme::{Theme, OS_COLOR_SCHEME};
+use crate::core::adb;
+use crate::core::sync::{Phone, get_devices_list, initial_load};
+use crate::core::theme::{OS_COLOR_SCHEME, Theme};
 use crate::core::uad_lists::UadListState;
-use crate::core::update::{get_latest_release, Release, SelfUpdateState, SelfUpdateStatus};
-use crate::core::utils::{string_to_theme, ANDROID_SERIAL, NAME};
+use crate::core::update::{Release, SelfUpdateState, SelfUpdateStatus, get_latest_release};
+use crate::core::utils::{NAME, string_to_theme};
 
 use iced::advanced::graphics::image::image_rs::ImageFormat;
 use iced::font;
@@ -18,15 +19,14 @@ use widgets::navigation_menu::nav_menu;
 
 use iced::widget::column;
 use iced::{
-    window::Settings as Window, Alignment, Application, Command, Element, Length, Renderer,
-    Settings,
+    Alignment, Application, Command, Element, Length, Renderer, Settings,
+    window::Settings as Window,
 };
-use std::env;
 #[cfg(feature = "self-update")]
 use std::path::PathBuf;
 
 #[cfg(feature = "self-update")]
-use crate::core::update::{bin_name, download_update_to_temp_file, remove_file};
+use crate::core::update::{BIN_NAME, download_update_to_temp_file, remove_file};
 
 #[derive(Default, Debug, Clone)]
 enum View {
@@ -107,11 +107,9 @@ impl Application for UadGui {
     fn title(&self) -> String {
         String::from("Universal Android Debloater Next Generation")
     }
-    // TODO: refactor later
     #[allow(clippy::too_many_lines)]
     fn update(&mut self, msg: Message) -> Command<Message> {
         match msg {
-            #[allow(clippy::option_if_let_else)]
             Message::LoadDevices(devices_list) => {
                 self.selected_device = match &self.selected_device {
                     Some(s_device) => {
@@ -125,7 +123,7 @@ impl Application for UadGui {
                 };
                 self.devices_list = devices_list;
 
-                #[allow(unused_must_use)]
+                #[expect(unused_must_use, reason = "side-effect")]
                 {
                     self.update(Message::SettingsAction(SettingsMessage::LoadDeviceSettings));
                 }
@@ -150,7 +148,7 @@ impl Application for UadGui {
             }
             Message::RefreshButtonPressed => {
                 self.apps_view = AppsView::default();
-                #[allow(unused_must_use)]
+                #[expect(unused_must_use, reason = "side-effect")]
                 {
                     self.update(Message::AppsAction(AppsMessage::ADBSatisfied(
                         self.adb_satisfied,
@@ -160,10 +158,14 @@ impl Application for UadGui {
             }
             Message::RebootButtonPressed => {
                 self.apps_view = AppsView::default();
+                let serial = match &self.selected_device {
+                    Some(d) => d.adb_id.clone(),
+                    _ => String::default(),
+                };
                 self.selected_device = None;
                 self.devices_list = vec![];
                 Command::perform(
-                    perform_adb_commands("reboot".to_string(), CommandType::Shell),
+                    async { adb::ACommand::new().shell(serial).reboot() },
                     |_| Message::Nothing,
                 )
             }
@@ -182,7 +184,7 @@ impl Application for UadGui {
                         self.nb_running_async_adb_commands -= 1;
                         self.view = View::List;
 
-                        #[allow(unused_must_use)]
+                        #[expect(unused_must_use, reason = "side-effect")]
                         {
                             self.apps_view.update(
                                 &mut self.settings_view,
@@ -238,9 +240,8 @@ impl Application for UadGui {
                         {
                             self.update_state.self_update.status = SelfUpdateStatus::Updating;
                             self.apps_view.loading_state = ListLoadingState::_UpdatingUad;
-                            let bin_name = bin_name().to_owned();
                             Command::perform(
-                                download_update_to_temp_file(bin_name, release.clone()),
+                                download_update_to_temp_file(BIN_NAME, release.clone()),
                                 Message::_NewReleaseDownloaded,
                             )
                         } else {
@@ -255,7 +256,6 @@ impl Application for UadGui {
             Message::DeviceSelected(s_device) => {
                 self.selected_device = Some(s_device.clone());
                 self.view = View::List;
-                env::set_var(ANDROID_SERIAL, s_device.adb_id);
                 info!("{:-^65}", "-");
                 info!(
                     "ANDROID_SDK: {} | DEVICE: {}",
@@ -264,7 +264,7 @@ impl Application for UadGui {
                 info!("{:-^65}", "-");
                 self.apps_view.loading_state = ListLoadingState::FindingPhones;
 
-                #[allow(unused_must_use)]
+                #[expect(unused_must_use, reason = "side-effects")]
                 {
                     self.update(Message::SettingsAction(SettingsMessage::LoadDeviceSettings));
                     self.update(Message::AppsAction(AppsMessage::ToggleAllSelected(false)));
@@ -312,7 +312,7 @@ impl Application for UadGui {
                     }
                 } else {
                     error!("Failed to update {NAME}!");
-                    #[allow(unused_must_use)]
+                    #[expect(unused_must_use, reason = "side-effect")]
                     {
                         self.update(Message::AppsAction(AppsMessage::UpdateFailed));
                         self.update_state.self_update.status = SelfUpdateStatus::Failed;
@@ -327,7 +327,7 @@ impl Application for UadGui {
                         self.update_state.self_update.latest_release = r;
                     }
                     Err(()) => self.update_state.self_update.status = SelfUpdateStatus::Failed,
-                };
+                }
                 Command::none()
             }
             Message::FontLoaded(result) => {

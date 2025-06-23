@@ -21,26 +21,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
-        lint: [check, test, clippy, fmt]
+        os: [ubuntu-22.04, windows-2022, macOS-14]
+        lint: [clippy, test, fmt]
         exclude: # https://github.com/community/community/discussions/7835
-          - os: windows-latest
-            lint: clippy
-          - os: windows-latest
+          - os: windows-2022
             lint: fmt
-          - os: macOS-latest
-            lint: clippy
-          - os: macOS-latest
+          - os: macOS-14
             lint: fmt
         include:
-          - lint: check
-            args: " --all-features"
+          - lint: clippy
+            args: " --all-features -- -D clippy::all -W clippy::style"
           - lint: test
             args: ""
-          - lint: clippy
-            args: " --all --all-features"
           - lint: fmt
-            args: " --all -- --check"
+            args: " -- --check"
     steps:
       - uses: actions/checkout@v4
       - uses: rui314/setup-mold@v1 # faster linker
@@ -61,7 +55,7 @@ jobs:
 
   coverage:
     name: coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

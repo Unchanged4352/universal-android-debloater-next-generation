@@ -1,15 +1,12 @@
 use crate::core::config::{Config, DeviceSettings};
-use crate::core::sync::{apply_pkg_state_commands, CorePackage, Phone, User};
+use crate::core::sync::{CorePackage, Phone, User, apply_pkg_state_commands};
 use crate::core::utils::DisplayablePath;
 use crate::gui::widgets::package_row::PackageRow;
-use crate::CACHE_DIR;
 use serde::{Deserialize, Serialize};
-use static_init::dynamic;
-use std::fs;
-use std::path::{Path, PathBuf};
-
-#[dynamic]
-pub static BACKUP_DIR: PathBuf = CACHE_DIR.join("backups");
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Default, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PhoneBackup {
@@ -57,7 +54,7 @@ pub async fn backup_phone(
             if let Err(e) = fs::create_dir_all(backup_path) {
                 error!("BACKUP: could not create backup dir: {}", e);
                 return Err(e.to_string());
-            };
+            }
 
             let backup_filename =
                 format!("{}.json", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"));
@@ -72,7 +69,6 @@ pub async fn backup_phone(
 }
 
 pub fn list_available_backups(dir: &Path) -> Vec<DisplayablePath> {
-    #[allow(clippy::option_if_let_else)]
     match fs::read_dir(dir) {
         Ok(files) => files
             .filter_map(Result::ok)
@@ -84,20 +80,16 @@ pub fn list_available_backups(dir: &Path) -> Vec<DisplayablePath> {
 
 pub fn list_available_backup_user(backup: DisplayablePath) -> Vec<User> {
     match fs::read_to_string(backup.path) {
-        Ok(data) => {
-            let phone_backup: PhoneBackup =
-                serde_json::from_str(&data).expect("Unable to parse backup file");
-
-            let mut users = vec![];
-            for u in phone_backup.users {
-                users.push(User {
-                    id: u.id,
-                    index: 0,
-                    protected: false,
-                });
-            }
-            users
-        }
+        Ok(data) => serde_json::from_str::<PhoneBackup>(&data)
+            .expect("Unable to parse backup file")
+            .users
+            .into_iter()
+            .map(|u| User {
+                id: u.id,
+                index: 0,
+                protected: false,
+            })
+            .collect(),
         Err(e) => {
             error!("[BACKUP]: Selected backup file not found: {}", e);
             vec![]
@@ -137,23 +129,22 @@ pub fn restore_backup(
                 };
 
                 for (i, backup_package) in u.packages.iter().enumerate() {
-                    let package: CorePackage;
-                    match packages[index]
+                    let package: CorePackage = match packages[index]
                         .iter()
                         .find(|x| x.name == backup_package.name)
                     {
-                        Some(p) => package = p.into(),
+                        Some(p) => p.into(),
                         None => {
                             return Err(format!(
                                 "{} not found for user {}",
                                 backup_package.name, u.id
-                            ))
+                            ));
                         }
-                    }
+                    };
                     let p_commands = apply_pkg_state_commands(
                         &package,
                         backup_package.state,
-                        &settings
+                        settings
                             .backup
                             .selected_user
                             .ok_or("field should be Some type")?,
